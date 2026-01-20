@@ -122,12 +122,15 @@ static int OpenAudio(vlc_object_t *obj)
     sys->model_path = psz ? psz : "ggml-base.bin";
     free(psz);
 
+    msg_Info(p_filter, "Cargando modelo Whisper desde: %s", sys->model_path.c_str());
     whisper_context_params cparams = whisper_context_default_params();
     sys->ctx = whisper_init_from_file_with_params(sys->model_path.c_str(), cparams);
     if (!sys->ctx) {
+        msg_Err(p_filter, "ERROR: No se pudo cargar el modelo en %s", sys->model_path.c_str());
         delete sys;
         return VLC_EGENERIC;
     }
+    msg_Info(p_filter, "Modelo Whisper cargado exitosamente.");
 
     {
         std::lock_guard<std::mutex> lock(g_state.lock);
@@ -205,11 +208,15 @@ static void WhisperWorker(filter_t *p_filter)
             continue;
         }
 
+        msg_Dbg(p_filter, "Iniciando inferencia Whisper (bloque de %d samples)", (int)samples.size());
+        
         whisper_full_params wp = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
         wp.language = "es";
 
         if (whisper_full(sys->ctx, wp, samples.data(), (int)samples.size()) == 0) {
             const int n = whisper_full_n_segments(sys->ctx);
+            msg_Dbg(p_filter, "Inferencia completada: %d segmentos encontrados", n);
+            
             std::string result;
             result.reserve(256);
 
@@ -260,6 +267,8 @@ static subpicture_t *FilterRender(filter_t *p_filter, mtime_t display_date)
     // Si el texto es viejo (más de 3 segundos), no mostrar nada
     if (mdate() - last > 3 * CLOCK_FREQ)
         return NULL;
+
+    msg_Dbg(p_filter, "Renderer: Desplegando subtítulo: [%s]", text.c_str());
 
     subpicture_t *p_spu = filter_NewSubpicture(p_filter);
     if (!p_spu) return NULL;
