@@ -80,13 +80,13 @@ vlc_module_begin ()
     add_string("whisper-model", "ggml-base.bin", N_("Model path"), NULL, false)
 
     // --- Sub-source Module ---
-    add_submodule ()
-        set_description(N_("Whisper Subtitle Renderer (Sub Source)"))
-        set_shortname(N_("Whisper Subs"))
-        set_capability("sub source", 10)
-        set_category(CAT_VIDEO)
-        set_subcategory(SUBCAT_VIDEO_SUBPIC)
-        set_callbacks(OpenRender, CloseRender) // Estilo 3.0.x
+    // add_submodule ()
+    //     set_description(N_("Whisper Subtitle Renderer (Sub Source)"))
+    //     set_shortname(N_("Whisper Subs"))
+    //     set_capability("sub source", 10)
+    //     set_category(CAT_VIDEO)
+    //     set_subcategory(SUBCAT_VIDEO_SUBPIC)
+    //     set_callbacks(OpenRender, CloseRender) // Estilo 3.0.x
 vlc_module_end ()
 
 // -----------------------------------------------------------------------------
@@ -109,39 +109,39 @@ static void WhisperWorker(filter_t *);
 
 static int OpenAudio(vlc_object_t *obj)
 {
-    filter_t *p_filter = (filter_t *)obj;
+    // filter_t *p_filter = (filter_t *)obj;
 
-    auto *sys = new(std::nothrow) filter_sys_t();
-    if (!sys) return VLC_ENOMEM;
+    // auto *sys = new(std::nothrow) filter_sys_t();
+    // if (!sys) return VLC_ENOMEM;
 
-    p_filter->p_sys = (filter_sys_t *)sys;
-    p_filter->pf_audio_filter = ProcessAudio; // Estilo 3.0.x: asignación directa
+    // p_filter->p_sys = (filter_sys_t *)sys;
+    // p_filter->pf_audio_filter = ProcessAudio; // Estilo 3.0.x: asignación directa
 
-    char *psz = var_InheritString(p_filter, "whisper-model");
-    sys->model_path = psz ? psz : "ggml-base.bin";
-    free(psz);
+    // char *psz = var_InheritString(p_filter, "whisper-model");
+    // sys->model_path = psz ? psz : "ggml-base.bin";
+    // free(psz);
 
-    msg_Info(p_filter, "Cargando modelo Whisper desde: %s", sys->model_path.c_str());
+    // msg_Info(p_filter, "Cargando modelo Whisper desde: %s", sys->model_path.c_str());
     
-    whisper_context_params cparams = whisper_context_default_params();
-    sys->ctx = whisper_init_from_file_with_params(sys->model_path.c_str(), cparams);
-    if (!sys->ctx) {
-        msg_Err(p_filter, "ERROR: No se pudo cargar el modelo en %s", sys->model_path.c_str());
-        delete sys;
-        p_filter->p_sys = nullptr;
-        return VLC_EGENERIC;
-    }
+    // whisper_context_params cparams = whisper_context_default_params();
+    // sys->ctx = whisper_init_from_file_with_params(sys->model_path.c_str(), cparams);
+    // if (!sys->ctx) {
+    //     msg_Err(p_filter, "ERROR: No se pudo cargar el modelo en %s", sys->model_path.c_str());
+    //     delete sys;
+    //     p_filter->p_sys = nullptr;
+    //     return VLC_EGENERIC;
+    // }
     
-    msg_Info(p_filter, "Modelo Whisper cargado exitosamente.");
+    // msg_Info(p_filter, "Modelo Whisper cargado exitosamente.");
 
-    {
-        std::lock_guard<std::mutex> lock(g_state.lock);
-        g_state.current_text.clear();
-        g_state.last_update = 0;
-    }
+    // {
+    //     std::lock_guard<std::mutex> lock(g_state.lock);
+    //     g_state.current_text.clear();
+    //     g_state.last_update = 0;
+    // }
 
-    sys->running = true;
-    sys->worker_thread = std::thread(WhisperWorker, p_filter);
+    // sys->running = true;
+    // sys->worker_thread = std::thread(WhisperWorker, p_filter);
 
     return VLC_SUCCESS;
 }
