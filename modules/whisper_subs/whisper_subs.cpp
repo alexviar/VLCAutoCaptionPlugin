@@ -17,6 +17,8 @@ typedef SSIZE_T ssize_t;
 #include <thread>
 #include <mutex>
 #include <chrono>
+#include <string>
+#include "whisper.h"
 
 #ifndef MODULE_STRING
 # define MODULE_STRING "whisper_subs"
@@ -26,7 +28,15 @@ typedef SSIZE_T ssize_t;
 # define N_(str) (str)
 #endif
 
+struct shared_state_t {
+    std::mutex lock;
+    std::string current_text;
+    mtime_t last_update = 0;
+};
+static shared_state_t g_state;
+
 struct filter_sys_t {
+    whisper_context *ctx = nullptr;
     std::vector<float> pcm_buffer; 
     std::mutex buffer_mutex;
     std::thread worker_thread;
@@ -43,6 +53,7 @@ vlc_module_begin ()
     set_shortname(N_("Whisper ASR"))
     set_capability("audio filter", 0)
     set_callbacks(OpenAudio, CloseAudio)
+    add_string("whisper-model", "ggml-base.bin", N_("Model path"), NULL, false)
 vlc_module_end ()
 
 static void WhisperWorker(filter_t *);
@@ -88,11 +99,44 @@ static block_t *ProcessAudio(filter_t *p_filter, block_t *p_block)
 static void WhisperWorker(filter_t *p_filter)
 {
     filter_sys_t *p_sys = (filter_sys_t *)p_filter->p_sys;
-    
+    const size_t CHUNK_SAMPLES = 16000 * 3;
+
     msg_Info(p_filter, "Hilo de Whisper iniciado.");
 
     while (p_sys->running) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        std::vector<float> samples;
+
+        {
+            std::lock_guard<std::mutex> lock(p_sys->buffer_mutex);
+            if (p_sys->pcm_buffer.size() >= CHUNK_SAMPLES) {
+                samples.assign(p_sys->pcm_buffer.begin(), p_sys->pcm_buffer.begin() + CHUNK_SAMPLES);
+                p_sys->pcm_buffer.erase(p_sys->pcm_buffer.begin(), p_sys->pcm_buffer.begin() + CHUNK_SAMPLES);
+            }
+        }
+
+        if (samples.empty()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            continue;
+        }
+
+        whisper_full_params wp = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
+        wp.language = "es";
+
+        if (whisper_full(p_sys->ctx, wp, samples.data(), (int)samples.size()) == 0) {
+            const int n = whisper_full_n_segments(p_sys->ctx);
+            std::string result;
+            for (int i = 0; i < n; ++i) {
+                const char* text = whisper_full_get_segment_text(p_sys->ctx, i);
+                if (text) result += text;
+            }
+
+            if (!result.empty()) {
+                msg_Info(p_filter, "Whisper: %s", result.c_str());
+                std::lock_guard<std::mutex> lock(g_state.lock);
+                g_state.current_text = result;
+                g_state.last_update = mdate();
+            }
+        }
     }
 
     msg_Info(p_filter, "Hilo de Whisper terminando.");
@@ -109,8 +153,21 @@ static int OpenAudio(vlc_object_t *obj)
 
     p_filter->p_sys = p_sys;
     p_filter->pf_audio_filter = ProcessAudio;
+
+    char *psz = var_InheritString(p_filter, "whisper-model");
+    const char *model_path = psz ? psz : "ggml-base.bin";
     
-    // Iniciamos la concurrencia
+    msg_Info(p_filter, "Cargando modelo: %s", model_path);
+    whisper_context_params cparams = whisper_context_default_params();
+    p_sys->ctx = whisper_init_from_file_with_params(model_path, cparams);
+    free(psz);
+
+    if (!p_sys->ctx) {
+        msg_Err(p_filter, "Error cargando Whisper");
+        delete p_sys;
+        return VLC_EGENERIC;
+    }
+    
     p_sys->running = true;
     p_sys->worker_thread = std::thread(WhisperWorker, p_filter);
 
@@ -127,6 +184,9 @@ static void CloseAudio(vlc_object_t *obj)
         p_sys->running = false;
         if (p_sys->worker_thread.joinable())
             p_sys->worker_thread.join();
+
+        if (p_sys->ctx)
+            whisper_free(p_sys->ctx);
 
         msg_Info(p_filter, "Liberando p_sys de prueba.");
         delete p_sys; 
