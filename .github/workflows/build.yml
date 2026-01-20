@@ -1,0 +1,49 @@
+name: Build VLC Whisper Plugin
+
+on:
+  push:
+    branches: "main"
+  pull_request:
+    branches: "main"
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Download VLC SDK (3.0.21)
+        shell: powershell
+        run: |
+          $VLC_VERSION = "3.0.21"
+          $URL = "http://download.videolan.org/pub/videolan/vlc/${VLC_VERSION}/win64/vlc-${VLC_VERSION}-win64.7z"
+          $OUT_FILE = "vlc.7z"
+
+          Write-Host "Downloading VLC SDK from $URL..."
+          Invoke-WebRequest -Uri $URL -OutFile $OUT_FILE
+
+          Write-Host "Extracting..."
+          7z x $OUT_FILE -oVLC_SDK_ROOT -y
+
+          # Move SDK to a known path or set env var
+          $SDK_PATH = Resolve-Path "VLC_SDK_ROOT\vlc-$VLC_VERSION\sdk"
+          echo "VLC_ADDON_PATH=$SDK_PATH" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8
+          Write-Host "VLC SDK set to $SDK_PATH"
+
+      - name: Configure CMake
+        run: |
+          cmake -B build -S . -DCMAKE_BUILD_TYPE=Release -DVLC_INCLUDE_DIRS="${{ env.VLC_ADDON_PATH }}\include"
+
+      - name: Build
+        run: cmake --build build --config Release
+
+      - name: List directory tree
+        run: |
+          Get-ChildItem -Path build -Recurse | Format-Table -Property FullName
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: whisper_subs_dll
+          path: build/Release/whisper_subs.dll
