@@ -1,6 +1,13 @@
 /**
  * whisper_subs.cpp
- * VLC Audio Filter Module using OpenAI Whisper for real-time subtitling
+ * VLC Hybrid Module: Audio Filter (Whisper) + Sub-Source (Renderer)
+ *
+ * Corrige uso de APIs internas no disponibles en SDK:
+ *  - NO subpicture_region_NewText()
+ *  - NO vlc_mlong_ToPango()
+ *  - NO subpicture_region_t::psz_text
+ *
+ * Usa API de plugins: subpicture_region_New + text_segment_New
  */
 
 #ifdef HAVE_CONFIG_H
@@ -11,246 +18,276 @@
 # include <basetsd.h>
 typedef SSIZE_T ssize_t;
 # include <winsock2.h>
-# define poll WSAPoll
+# ifndef poll
+#  define poll WSAPoll
+# endif
+
 #endif
 
-#ifndef __PLUGIN__
-# define __PLUGIN__
-#endif
-
+// VLC headers
 #include <vlc_common.h>
 #include <vlc_plugin.h>
 #include <vlc_aout.h>
 #include <vlc_filter.h>
-#include <vlc_vout.h>
-#include <vlc_vout_osd.h>
-
-// Fallback for VLC 3.0 macros if hidden or missing in MSVC
-#ifndef VLC_OBJECT_INPUT
-# define VLC_OBJECT_INPUT 6
-#endif
-#ifndef FIND_ANYWHERE
-# define FIND_ANYWHERE 0x0001
-#endif
-#ifndef N_
-# define N_(str) (str)
-#endif
-#ifndef MODULE_STRING
-# define MODULE_STRING "whisper_subs"
-#endif
-
-// Manual declarations to avoid circular header issues in MSVC
-typedef struct input_thread_t input_thread_t;
-VLC_API vout_thread_t *input_GetVout(input_thread_t *);
-VLC_API void *vlc_object_find(vlc_object_t *, int, int);
-VLC_API void vlc_object_release(void *);
+#include <vlc_subpicture.h>
+#include <vlc_text_style.h>
 
 #include <vector>
 #include <string>
 #include <thread>
 #include <mutex>
+#include <chrono>
+
 #include "whisper.h"
 
-// -----------------------------------------------------------------------------
-// Module Description
-// -----------------------------------------------------------------------------
-static int  Open (vlc_object_t *);
-static void Close(vlc_object_t *);
+#ifndef MODULE_STRING
+# define MODULE_STRING "whisper_subs"
+#endif
 
-#define MODEL_PATH_TEXT N_("Path to Whisper Model")
-#define MODEL_PATH_LONGTEXT N_("Full path to the ggml whisper model binary (e.g. ggml-base.bin).")
+#ifndef N_
+# define N_(str) (str)
+#endif
 
+// -----------------------------------------------------------------------------
+// Global Shared State (Communication between Audio Filter and Sub-Source)
+// -----------------------------------------------------------------------------
+struct shared_state_t {
+    std::mutex lock;
+    std::string current_text;
+    mtime_t last_update = 0;
+};
+
+static shared_state_t g_state;
+
+// -----------------------------------------------------------------------------
+// Module Prototypes
+// -----------------------------------------------------------------------------
+static int  OpenAudio (vlc_object_t *);
+static void CloseAudio(vlc_object_t *);
+static int  OpenRender(vlc_object_t *);
+static void CloseRender(vlc_object_t *);
+
+// -----------------------------------------------------------------------------
+// VLC module definition (2 modules in the SAME binary)
+// -----------------------------------------------------------------------------
 vlc_module_begin ()
-    set_description(N_("Whisper Subtitles Audio Filter"))
-    set_shortname(N_("Whisper Subs"))
+    // --- Audio Filter Module ---
+    set_description(N_("Whisper Audio-to-Text (Audio Filter)"))
+    set_shortname(N_("Whisper ASR"))
     set_capability("audio filter", 0)
     set_category(CAT_AUDIO)
     set_subcategory(SUBCAT_AUDIO_AFILTER)
-    
-    add_string("whisper-model-path", "ggml-base.bin", MODEL_PATH_TEXT, MODEL_PATH_LONGTEXT, false)
+    set_callbacks(OpenAudio, CloseAudio)
+    add_string("whisper-model", "ggml-base.bin", N_("Model path"), NULL, false)
 
-    set_callbacks(Open, Close)
+    // --- Sub-source Module ---
+    add_submodule ()
+        set_description(N_("Whisper Subtitle Renderer (Sub Source)"))
+        set_shortname(N_("Whisper Subs"))
+        set_capability("sub source", 10)
+        set_category(CAT_VIDEO)
+        set_subcategory(SUBCAT_VIDEO_SUBPIC)
+        set_callbacks(OpenRender, CloseRender)
 vlc_module_end ()
 
 // -----------------------------------------------------------------------------
-// Internal Data Structures
+// Audio Filter Implementation
 // -----------------------------------------------------------------------------
+struct filter_sys_t {
+    whisper_context *ctx = nullptr;
 
-struct filter_sys_t
-{
-    // Whisper State
-    struct whisper_context *ctx;
-    struct whisper_full_params wparams;
-    
-    // Audio Buffering
     std::vector<float> pcm_buffer;
     std::mutex buffer_mutex;
-    
-    // Threading
+
     std::thread worker_thread;
-    bool running;
-    
-    // VLC references
-    vlc_object_t *obj;
+    bool running = false;
+
     std::string model_path;
 };
 
-// -----------------------------------------------------------------------------
-// Forward Declarations
-// -----------------------------------------------------------------------------
-static block_t *Process(filter_t *, block_t *);
-static void WorkerLoop(filter_t *p_filter);
+static block_t *ProcessAudio(filter_t *, block_t *);
+static void WhisperWorker(filter_t *);
 
-// -----------------------------------------------------------------------------
-// Open: Initialize Module
-// -----------------------------------------------------------------------------
-static int Open(vlc_object_t *obj)
+static int OpenAudio(vlc_object_t *obj)
 {
     filter_t *p_filter = (filter_t *)obj;
-    
-    // Allocate system structure
-    filter_sys_t *sys = new(std::nothrow) filter_sys_t();
-    if (!sys)
-        return VLC_ENOMEM;
-    
+
+    auto *sys = new(std::nothrow) filter_sys_t();
+    if (!sys) return VLC_ENOMEM;
+
     p_filter->p_sys = sys;
-    sys->obj = obj;
-    p_filter->fmt_in.audio.i_format = VLC_CODEC_FL32;
-    p_filter->fmt_out.audio = p_filter->fmt_in.audio;
-    p_filter->pf_audio_filter = Process;
+    p_filter->pf_audio_filter = ProcessAudio;
 
-    // Load Model Path configuration
-    char *psz_model = var_InheritString(p_filter, "whisper-model-path");
-    if (psz_model) {
-        sys->model_path = psz_model;
-        free(psz_model);
-    } else {
-        sys->model_path = "ggml-base.bin"; // Default fallback
-    }
+    char *psz = var_InheritString(p_filter, "whisper-model");
+    sys->model_path = psz ? psz : "ggml-base.bin";
+    free(psz);
 
-    // Initialize Whisper Context
-    struct whisper_context_params cparams = whisper_context_default_params();
+    whisper_context_params cparams = whisper_context_default_params();
     sys->ctx = whisper_init_from_file_with_params(sys->model_path.c_str(), cparams);
     if (!sys->ctx) {
-        msg_Err(p_filter, "Failed to initialize Whisper context from '%s'", sys->model_path.c_str());
         delete sys;
         return VLC_EGENERIC;
     }
 
-    // Start Worker Thread
-    sys->running = true;
-    sys->worker_thread = std::thread(WorkerLoop, p_filter);
+    {
+        std::lock_guard<std::mutex> lock(g_state.lock);
+        g_state.current_text.clear();
+        g_state.last_update = 0;
+    }
 
-    msg_Info(p_filter, "Whisper Subs module initialized successfully.");
+    sys->running = true;
+    sys->worker_thread = std::thread(WhisperWorker, p_filter);
     return VLC_SUCCESS;
 }
 
-// -----------------------------------------------------------------------------
-// Close: Cleanup
-// -----------------------------------------------------------------------------
-static void Close(vlc_object_t *obj)
+static void CloseAudio(vlc_object_t *obj)
 {
     filter_t *p_filter = (filter_t *)obj;
-    filter_sys_t *sys = p_filter->p_sys;
+    auto *sys = (filter_sys_t *)p_filter->p_sys;
 
-    // Stop worker thread
+    if (!sys) return;
+
     sys->running = false;
-    if (sys->worker_thread.joinable()) {
+    if (sys->worker_thread.joinable())
         sys->worker_thread.join();
-    }
 
-    if (sys->ctx) {
+    if (sys->ctx)
         whisper_free(sys->ctx);
-    }
 
     delete sys;
+    p_filter->p_sys = nullptr;
 }
 
-// -----------------------------------------------------------------------------
-// Process: Audio Callback
-// -----------------------------------------------------------------------------
-static block_t *Process(filter_t *p_filter, block_t *p_block)
+static block_t *ProcessAudio(filter_t *p_filter, block_t *p_block)
 {
-    if (!p_block) return NULL;
+    auto *sys = (filter_sys_t *)p_filter->p_sys;
+    if (!sys || !p_block) return p_block;
 
-    filter_sys_t *sys = p_filter->p_sys;
+    if (p_filter->fmt_in.i_codec != VLC_CODEC_FL32)
+        return p_block;
 
-    float *p_samples = (float *)p_block->p_buffer;
+    const unsigned ch = p_filter->fmt_in.audio.i_channels;
+    if (ch == 0 || p_block->i_nb_samples == 0)
+        return p_block;
 
-    {
-        std::lock_guard<std::mutex> lock(sys->buffer_mutex);
-        for (size_t i = 0; i < p_block->i_nb_samples; ++i) {
-            // Grab the first channel of the frame (usually Left)
-            float sample = p_samples[i * p_filter->fmt_in.audio.i_channels]; 
-            sys->pcm_buffer.push_back(sample);
-        }
+    const float *p_samples = (const float *)p_block->p_buffer;
+
+    // Guardamos MONO (canal 0) como hacías tú. (Mejor: downmix promedio después)
+    std::lock_guard<std::mutex> lock(sys->buffer_mutex);
+    sys->pcm_buffer.reserve(sys->pcm_buffer.size() + p_block->i_nb_samples);
+
+    for (size_t i = 0; i < p_block->i_nb_samples; ++i) {
+        sys->pcm_buffer.push_back(p_samples[i * ch]); // canal 0
     }
 
-    return p_block; // Pass block through untouched
+    return p_block; // passthrough (no alteramos audio)
 }
 
-// -----------------------------------------------------------------------------
-// WorkerLoop: Whisper Inference
-// -----------------------------------------------------------------------------
-static void WorkerLoop(filter_t *p_filter)
+static void WhisperWorker(filter_t *p_filter)
 {
-    filter_sys_t *sys = p_filter->p_sys;
-    const int SAMPLE_RATE = 16000;
-    const size_t MIN_DURATION_SEC = 3; 
-    const size_t MIN_SAMPLES = SAMPLE_RATE * MIN_DURATION_SEC;
+    auto *sys = (filter_sys_t *)p_filter->p_sys;
+
+    const size_t CHUNK_SAMPLES = 16000 * 3;
 
     while (sys->running) {
-        std::vector<float> process_buffer;
+        std::vector<float> samples;
 
-        // check buffer size
         {
             std::lock_guard<std::mutex> lock(sys->buffer_mutex);
-            if (sys->pcm_buffer.size() >= MIN_SAMPLES) {
-                // Take content to process
-                process_buffer = sys->pcm_buffer;
-                sys->pcm_buffer.clear(); 
+            if (sys->pcm_buffer.size() >= CHUNK_SAMPLES) {
+                samples.assign(sys->pcm_buffer.begin(), sys->pcm_buffer.begin() + CHUNK_SAMPLES);
+                sys->pcm_buffer.erase(sys->pcm_buffer.begin(), sys->pcm_buffer.begin() + CHUNK_SAMPLES);
             }
         }
 
-        if (process_buffer.empty()) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        if (samples.empty()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(80));
             continue;
         }
 
-        // Run Inference
-        whisper_full_params wparams = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
-        wparams.print_progress = false;
-        wparams.print_special = false;
-        wparams.print_realtime = false;
-        wparams.print_timestamps = false;
-        wparams.translate = false;
-        wparams.language = "es"; 
+        whisper_full_params wp = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
+        wp.language = "es";
 
-        if (whisper_full(sys->ctx, wparams, process_buffer.data(), (int)process_buffer.size()) != 0) {
-            msg_Err(p_filter, "Failed to process audio with Whisper");
-            continue;
-        }
+        if (whisper_full(sys->ctx, wp, samples.data(), (int)samples.size()) == 0) {
+            const int n = whisper_full_n_segments(sys->ctx);
+            std::string result;
+            result.reserve(256);
 
-        // Get Text
-        int n_segments = whisper_full_n_segments(sys->ctx);
-        for (int i = 0; i < n_segments; ++i) {
-            const char *text = whisper_full_get_segment_text(sys->ctx, i);
-            if (text && text[0] != '\0') {
-                msg_Dbg(p_filter, "Whisper: %s", text);
-                
-                // Show on OSD
-                // Finding the input object to get the VOUT
-                vlc_object_t *p_input = (vlc_object_t *)vlc_object_find(p_filter, VLC_OBJECT_INPUT, FIND_ANYWHERE);
-                if (p_input) {
-                    vout_thread_t *p_vout = input_GetVout((input_thread_t *)p_input);
-                    if (p_vout) {
-                        // Channel 1 is usually the default OSD channel
-                        vout_OSDMessage(p_vout, 1, "%s", text);
-                        vlc_object_release(p_vout);
-                    }
-                    vlc_object_release(p_input);
-                }
+            for (int i = 0; i < n; ++i)
+                result += whisper_full_get_segment_text(sys->ctx, i);
+
+            // Publicamos lo último
+            if (!result.empty()) {
+                std::lock_guard<std::mutex> lock(g_state.lock);
+                g_state.current_text = result;
+                g_state.last_update = mdate();
             }
         }
     }
+}
+
+// -----------------------------------------------------------------------------
+// Sub-Source Renderer Implementation
+// -----------------------------------------------------------------------------
+static subpicture_t *FilterRender(filter_t *, mtime_t);
+
+static int OpenRender(vlc_object_t *obj)
+{
+    filter_t *p_filter = (filter_t *)obj;
+    p_filter->pf_sub_source = FilterRender;
+    return VLC_SUCCESS;
+}
+
+static void CloseRender(vlc_object_t *obj)
+{
+    (void)obj;
+}
+
+static subpicture_t *FilterRender(filter_t *p_filter, mtime_t display_date)
+{
+    std::string text;
+    mtime_t last;
+
+    {
+        std::lock_guard<std::mutex> lock(g_state.lock);
+        text = g_state.current_text;
+        last = g_state.last_update;
+    }
+
+    if (text.empty() || last == 0)
+        return NULL;
+
+    // Si el texto es viejo (más de 3 segundos), no mostrar nada
+    if (mdate() - last > 3 * CLOCK_FREQ)
+        return NULL;
+
+    subpicture_t *p_spu = filter_NewSubpicture(p_filter);
+    if (!p_spu) return NULL;
+
+    // Región de texto usando API del SDK (NO NewText / NO psz_text)
+    video_format_t fmt;
+    video_format_Init(&fmt, VLC_CODEC_TEXT);
+
+    subpicture_region_t *p_region = subpicture_region_New(&fmt);
+    video_format_Clean(&fmt);
+
+    if (!p_region) {
+        subpicture_Delete(p_spu);
+        return NULL;
+    }
+
+    p_region->p_text = text_segment_New(text.c_str());
+    if (!p_region->p_text) {
+        subpicture_region_Delete(p_region);
+        subpicture_Delete(p_spu);
+        return NULL;
+    }
+
+    p_spu->p_region = p_region;
+    p_spu->i_start = display_date;
+    p_spu->i_stop = display_date + 2 * CLOCK_FREQ;
+    p_spu->b_ephemer = true;
+    p_spu->b_absolute = false;
+
+    return p_spu;
 }

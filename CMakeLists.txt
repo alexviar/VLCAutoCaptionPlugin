@@ -55,6 +55,18 @@ target_include_directories(whisper_subs PRIVATE
 # Link against internal whisper library
 target_link_libraries(whisper_subs PRIVATE whisper)
 
+if (WIN32)
+    if (NOT VLC_LIB_DIR)
+        set(VLC_LIB_DIR "C:/Program Files/VideoLAN/VLC/sdk/lib" CACHE PATH "Path to VLC SDK libs")
+    endif()
+    message(STATUS "VLC Lib Dir: ${VLC_LIB_DIR}")
+
+    target_link_directories(whisper_subs PRIVATE ${VLC_LIB_DIR})
+
+    # Usually needed to resolve mdate/var_Inherit/subpicture/etc.
+    target_link_libraries(whisper_subs PRIVATE libvlccore libvlc)
+endif()
+
 # VLC Plugins are shared libraries but often need specific prefixes/suffixes
 set_target_properties(whisper_subs PROPERTIES
     PREFIX ""
