@@ -63,9 +63,9 @@ if (WIN32)
     message(STATUS "VLC Lib Dir: ${VLC_LIB_DIR}")
 
     target_link_directories(whisper_subs PRIVATE ${VLC_LIB_DIR})
-
+    
     # Usually needed to resolve mdate/var_Inherit/subpicture/etc.
-    target_link_libraries(whisper_subs PRIVATE libvlccore libvlc)
+    target_link_libraries(whisper_subs PRIVATE libvlccore)
 endif()
 
 # VLC Plugins are shared libraries but often need specific prefixes/suffixes
