@@ -1,13 +1,9 @@
 /**
- * whisper_subs.cpp - PRUEBA DE ESTABILIDAD MÍNIMA
+ * whisper_subs.cpp - PASO 2: Memoria Dinámica y Logs
  * 
- * Este archivo ha sido reducido al mínimo absoluto para diagnosticar crashes en el playback.
- * - Sin objetos globales.
- * - Sin hilos.
- * - Sin C++ Standard Library (vector, string, etc).
- * - Sin dependencias externas (whisper).
+ * Verificamos que podemos asignar p_sys y emitir logs sin inestabilidad.
  */
- 
+
 #ifdef _WIN32
 # include <basetsd.h>
 typedef SSIZE_T ssize_t;
@@ -25,30 +21,48 @@ typedef SSIZE_T ssize_t;
 # define MODULE_STRING "whisper_subs"
 #endif
 
+// Estructura de sistema simple
+struct filter_sys_t {
+    int block_count;
+};
+
 extern "C" {
     static int  OpenAudio (vlc_object_t *);
     static void CloseAudio(vlc_object_t *);
 }
 
 vlc_module_begin ()
-    set_description("Whisper Stability Test")
+    set_description("Whisper Step 2: Logs & System")
     set_capability("audio filter", 0)
     set_callbacks(OpenAudio, CloseAudio)
 vlc_module_end ()
 
-// Procesado passthrough puro (no debería crashear bajo ninguna circunstancia)
 static block_t *ProcessAudio(filter_t *p_filter, block_t *p_block)
 {
-    (void)p_filter;
-    return p_block;
+    filter_sys_t *p_sys = (filter_sys_t *)p_filter->p_sys;
+    
+    if (p_sys) {
+        p_sys->block_count++;
+        // Logueamos solo una vez cada 1000 bloques para confirmar actividad
+        if (p_sys->block_count % 1000 == 0) {
+            msg_Info(p_filter, "Actividad de filtro Whisper: %d bloques recibidos", p_sys->block_count);
+        }
+    }
+
+    return p_block; // Passthrough
 }
 
 static int OpenAudio(vlc_object_t *obj)
 {
     filter_t *p_filter = (filter_t *)obj;
     
-    // No reservamos memoria, solo asignamos el callback
-    p_filter->p_sys = NULL; 
+    msg_Info(p_filter, "Inicializando p_sys de prueba...");
+
+    filter_sys_t *p_sys = (filter_sys_t *)malloc(sizeof(filter_sys_t));
+    if (!p_sys) return VLC_ENOMEM;
+
+    p_sys->block_count = 0;
+    p_filter->p_sys = p_sys;
     p_filter->pf_audio_filter = ProcessAudio;
     
     return VLC_SUCCESS;
@@ -56,5 +70,10 @@ static int OpenAudio(vlc_object_t *obj)
 
 static void CloseAudio(vlc_object_t *obj)
 {
-    (void)obj;
+    filter_t *p_filter = (filter_t *)obj;
+    if (p_filter->p_sys) {
+        msg_Info(p_filter, "Liberando p_sys de prueba.");
+        free(p_filter->p_sys);
+        p_filter->p_sys = NULL;
+    }
 }
