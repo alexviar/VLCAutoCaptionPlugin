@@ -2,10 +2,10 @@
  * whisper_subs.cpp
  * VLC Hybrid Module: Audio Filter (Whisper) + Sub-Source (Renderer)
  *
- * Seguimiento estricto del patrón de VLC moderno (modules/audio_filter/gain.c):
- * - Uso de vlc_filter_operations para callbacks.
- * - Registro vía set_callback(Open).
- * - Separación de namespaces para evitar conflictos de ABI.
+ * Compatible con VLC SDK 3.0.x
+ * Basado en:
+ * - modules/audio_filter/gain.c (branch 3.0.x)
+ * - modules/spu/marq.c (branch 3.0.x)
  */
 
 #ifdef HAVE_CONFIG_H
@@ -57,11 +57,13 @@ struct shared_state_t {
 static shared_state_t g_state;
 
 // -----------------------------------------------------------------------------
-// Forward Declarations
+// Prototypes (Linkage C para VLC)
 // -----------------------------------------------------------------------------
 extern "C" {
     static int  OpenAudio (vlc_object_t *);
+    static void CloseAudio(vlc_object_t *);
     static int  OpenRender(vlc_object_t *);
+    static void CloseRender(vlc_object_t *);
 }
 
 // -----------------------------------------------------------------------------
@@ -74,7 +76,7 @@ vlc_module_begin ()
     set_capability("audio filter", 0)
     set_category(CAT_AUDIO)
     set_subcategory(SUBCAT_AUDIO_AFILTER)
-    set_callback(OpenAudio) 
+    set_callbacks(OpenAudio, CloseAudio) // Estilo 3.0.x
     add_string("whisper-model", "ggml-base.bin", N_("Model path"), NULL, false)
 
     // --- Sub-source Module ---
@@ -84,7 +86,7 @@ vlc_module_begin ()
         set_capability("sub source", 10)
         set_category(CAT_VIDEO)
         set_subcategory(SUBCAT_VIDEO_SUBPIC)
-        set_callback(OpenRender)
+        set_callbacks(OpenRender, CloseRender) // Estilo 3.0.x
 vlc_module_end ()
 
 // -----------------------------------------------------------------------------
@@ -103,13 +105,7 @@ struct filter_sys_t {
 };
 
 static block_t *ProcessAudio(filter_t *, block_t *);
-static void CloseAudio(filter_t *);
 static void WhisperWorker(filter_t *);
-
-static const struct vlc_filter_operations filter_ops = {
-    .filter_audio = ProcessAudio,
-    .close = CloseAudio,
-};
 
 static int OpenAudio(vlc_object_t *obj)
 {
@@ -118,8 +114,8 @@ static int OpenAudio(vlc_object_t *obj)
     auto *sys = new(std::nothrow) filter_sys_t();
     if (!sys) return VLC_ENOMEM;
 
-    p_filter->p_sys = sys;
-    p_filter->ops = &filter_ops;
+    p_filter->p_sys = (filter_sys_t *)sys;
+    p_filter->pf_audio_filter = ProcessAudio; // Estilo 3.0.x: asignación directa
 
     char *psz = var_InheritString(p_filter, "whisper-model");
     sys->model_path = psz ? psz : "ggml-base.bin";
@@ -132,6 +128,7 @@ static int OpenAudio(vlc_object_t *obj)
     if (!sys->ctx) {
         msg_Err(p_filter, "ERROR: No se pudo cargar el modelo en %s", sys->model_path.c_str());
         delete sys;
+        p_filter->p_sys = nullptr;
         return VLC_EGENERIC;
     }
     
@@ -145,11 +142,13 @@ static int OpenAudio(vlc_object_t *obj)
 
     sys->running = true;
     sys->worker_thread = std::thread(WhisperWorker, p_filter);
+
     return VLC_SUCCESS;
 }
 
-static void CloseAudio(filter_t *p_filter)
+static void CloseAudio(vlc_object_t *obj)
 {
+    filter_t *p_filter = (filter_t *)obj;
     auto *sys = (filter_sys_t *)p_filter->p_sys;
     if (!sys) return;
 
@@ -180,7 +179,7 @@ static block_t *ProcessAudio(filter_t *p_filter, block_t *p_block)
 
     std::lock_guard<std::mutex> lock(sys->buffer_mutex);
     
-    // Limitar buffer a 10 segundos (160k samples) para evitar OOM
+    // Evitar OOM: Mantener máx 10 segundos de audio (160k samples a 16kHz)
     if (sys->pcm_buffer.size() > 16000 * 10) {
         sys->pcm_buffer.erase(sys->pcm_buffer.begin(), sys->pcm_buffer.begin() + p_block->i_nb_samples);
     }
@@ -188,7 +187,7 @@ static block_t *ProcessAudio(filter_t *p_filter, block_t *p_block)
     sys->pcm_buffer.reserve(sys->pcm_buffer.size() + p_block->i_nb_samples);
 
     for (size_t i = 0; i < p_block->i_nb_samples; ++i) {
-        sys->pcm_buffer.push_back(p_samples[i * ch]); // canal 0
+        sys->pcm_buffer.push_back(p_samples[i * ch]); // Mono (canal 0)
     }
 
     return p_block; // passthrough (no alteramos audio)
@@ -216,6 +215,7 @@ static void WhisperWorker(filter_t *p_filter)
         }
 
         msg_Dbg(p_filter, "Iniciando inferencia Whisper (bloque de %d samples)", (int)samples.size());
+        
         whisper_full_params wp = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
         wp.language = "es";
 
@@ -228,7 +228,7 @@ static void WhisperWorker(filter_t *p_filter)
 
             for (int i = 0; i < n; ++i) {
                 const char* text = whisper_full_get_segment_text(sys->ctx, i);
-                if(text) result += text;
+                if (text) result += text;
             }
 
             // Publicamos lo último
@@ -246,15 +246,16 @@ static void WhisperWorker(filter_t *p_filter)
 // -----------------------------------------------------------------------------
 static subpicture_t *FilterRender(filter_t *, mtime_t);
 
-static const struct vlc_filter_operations render_ops = {
-    .filter_sub = FilterRender, 
-};
-
 static int OpenRender(vlc_object_t *obj)
 {
     filter_t *p_filter = (filter_t *)obj;
-    p_filter->ops = &render_ops;
+    p_filter->pf_sub_source = FilterRender; // Estilo 3.0.x: asignación directa
     return VLC_SUCCESS;
+}
+
+static void CloseRender(vlc_object_t *obj)
+{
+    (void)obj;
 }
 
 static subpicture_t *FilterRender(filter_t *p_filter, mtime_t display_date)
