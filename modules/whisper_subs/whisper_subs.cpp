@@ -2,12 +2,10 @@
  * whisper_subs.cpp
  * VLC Hybrid Module: Audio Filter (Whisper) + Sub-Source (Renderer)
  *
- * Corrige uso de APIs internas no disponibles en SDK:
- *  - NO subpicture_region_NewText()
- *  - NO vlc_mlong_ToPango()
- *  - NO subpicture_region_t::psz_text
- *
- * Usa API de plugins: subpicture_region_New + text_segment_New
+ * Seguimiento estricto del patrón de VLC moderno (modules/audio_filter/gain.c):
+ * - Uso de vlc_filter_operations para callbacks.
+ * - Registro vía set_callback(Open).
+ * - Separación de namespaces para evitar conflictos de ABI.
  */
 
 #ifdef HAVE_CONFIG_H
@@ -21,7 +19,6 @@ typedef SSIZE_T ssize_t;
 # ifndef poll
 #  define poll WSAPoll
 # endif
-
 #endif
 
 // VLC headers
@@ -60,15 +57,15 @@ struct shared_state_t {
 static shared_state_t g_state;
 
 // -----------------------------------------------------------------------------
-// Module Prototypes
+// Forward Declarations
 // -----------------------------------------------------------------------------
-static int  OpenAudio (vlc_object_t *);
-static void CloseAudio(vlc_object_t *);
-static int  OpenRender(vlc_object_t *);
-static void CloseRender(vlc_object_t *);
+extern "C" {
+    static int  OpenAudio (vlc_object_t *);
+    static int  OpenRender(vlc_object_t *);
+}
 
 // -----------------------------------------------------------------------------
-// VLC module definition (2 modules in the SAME binary)
+// VLC module definition
 // -----------------------------------------------------------------------------
 vlc_module_begin ()
     // --- Audio Filter Module ---
@@ -77,7 +74,7 @@ vlc_module_begin ()
     set_capability("audio filter", 0)
     set_category(CAT_AUDIO)
     set_subcategory(SUBCAT_AUDIO_AFILTER)
-    set_callbacks(OpenAudio, CloseAudio)
+    set_callback(OpenAudio) 
     add_string("whisper-model", "ggml-base.bin", N_("Model path"), NULL, false)
 
     // --- Sub-source Module ---
@@ -87,7 +84,7 @@ vlc_module_begin ()
         set_capability("sub source", 10)
         set_category(CAT_VIDEO)
         set_subcategory(SUBCAT_VIDEO_SUBPIC)
-        set_callbacks(OpenRender, CloseRender)
+        set_callback(OpenRender)
 vlc_module_end ()
 
 // -----------------------------------------------------------------------------
@@ -106,7 +103,13 @@ struct filter_sys_t {
 };
 
 static block_t *ProcessAudio(filter_t *, block_t *);
+static void CloseAudio(filter_t *);
 static void WhisperWorker(filter_t *);
+
+static const struct vlc_filter_operations filter_ops = {
+    .filter_audio = ProcessAudio,
+    .close = CloseAudio,
+};
 
 static int OpenAudio(vlc_object_t *obj)
 {
@@ -116,13 +119,14 @@ static int OpenAudio(vlc_object_t *obj)
     if (!sys) return VLC_ENOMEM;
 
     p_filter->p_sys = sys;
-    p_filter->pf_audio_filter = ProcessAudio;
+    p_filter->ops = &filter_ops;
 
     char *psz = var_InheritString(p_filter, "whisper-model");
     sys->model_path = psz ? psz : "ggml-base.bin";
     free(psz);
 
     msg_Info(p_filter, "Cargando modelo Whisper desde: %s", sys->model_path.c_str());
+    
     whisper_context_params cparams = whisper_context_default_params();
     sys->ctx = whisper_init_from_file_with_params(sys->model_path.c_str(), cparams);
     if (!sys->ctx) {
@@ -130,6 +134,7 @@ static int OpenAudio(vlc_object_t *obj)
         delete sys;
         return VLC_EGENERIC;
     }
+    
     msg_Info(p_filter, "Modelo Whisper cargado exitosamente.");
 
     {
@@ -143,11 +148,9 @@ static int OpenAudio(vlc_object_t *obj)
     return VLC_SUCCESS;
 }
 
-static void CloseAudio(vlc_object_t *obj)
+static void CloseAudio(filter_t *p_filter)
 {
-    filter_t *p_filter = (filter_t *)obj;
     auto *sys = (filter_sys_t *)p_filter->p_sys;
-
     if (!sys) return;
 
     sys->running = false;
@@ -175,8 +178,13 @@ static block_t *ProcessAudio(filter_t *p_filter, block_t *p_block)
 
     const float *p_samples = (const float *)p_block->p_buffer;
 
-    // Guardamos MONO (canal 0) como hacías tú. (Mejor: downmix promedio después)
     std::lock_guard<std::mutex> lock(sys->buffer_mutex);
+    
+    // Limitar buffer a 10 segundos (160k samples) para evitar OOM
+    if (sys->pcm_buffer.size() > 16000 * 10) {
+        sys->pcm_buffer.erase(sys->pcm_buffer.begin(), sys->pcm_buffer.begin() + p_block->i_nb_samples);
+    }
+
     sys->pcm_buffer.reserve(sys->pcm_buffer.size() + p_block->i_nb_samples);
 
     for (size_t i = 0; i < p_block->i_nb_samples; ++i) {
@@ -189,7 +197,6 @@ static block_t *ProcessAudio(filter_t *p_filter, block_t *p_block)
 static void WhisperWorker(filter_t *p_filter)
 {
     auto *sys = (filter_sys_t *)p_filter->p_sys;
-
     const size_t CHUNK_SAMPLES = 16000 * 3;
 
     while (sys->running) {
@@ -204,12 +211,11 @@ static void WhisperWorker(filter_t *p_filter)
         }
 
         if (samples.empty()) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(80));
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
             continue;
         }
 
         msg_Dbg(p_filter, "Iniciando inferencia Whisper (bloque de %d samples)", (int)samples.size());
-        
         whisper_full_params wp = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
         wp.language = "es";
 
@@ -220,8 +226,10 @@ static void WhisperWorker(filter_t *p_filter)
             std::string result;
             result.reserve(256);
 
-            for (int i = 0; i < n; ++i)
-                result += whisper_full_get_segment_text(sys->ctx, i);
+            for (int i = 0; i < n; ++i) {
+                const char* text = whisper_full_get_segment_text(sys->ctx, i);
+                if(text) result += text;
+            }
 
             // Publicamos lo último
             if (!result.empty()) {
@@ -238,16 +246,15 @@ static void WhisperWorker(filter_t *p_filter)
 // -----------------------------------------------------------------------------
 static subpicture_t *FilterRender(filter_t *, mtime_t);
 
+static const struct vlc_filter_operations render_ops = {
+    .filter_sub = FilterRender, 
+};
+
 static int OpenRender(vlc_object_t *obj)
 {
     filter_t *p_filter = (filter_t *)obj;
-    p_filter->pf_sub_source = FilterRender;
+    p_filter->ops = &render_ops;
     return VLC_SUCCESS;
-}
-
-static void CloseRender(vlc_object_t *obj)
-{
-    (void)obj;
 }
 
 static subpicture_t *FilterRender(filter_t *p_filter, mtime_t display_date)
@@ -261,11 +268,7 @@ static subpicture_t *FilterRender(filter_t *p_filter, mtime_t display_date)
         last = g_state.last_update;
     }
 
-    if (text.empty() || last == 0)
-        return NULL;
-
-    // Si el texto es viejo (más de 3 segundos), no mostrar nada
-    if (mdate() - last > 3 * CLOCK_FREQ)
+    if (text.empty() || last == 0 || (mdate() - last > 3 * CLOCK_FREQ))
         return NULL;
 
     msg_Dbg(p_filter, "Renderer: Desplegando subtítulo: [%s]", text.c_str());
@@ -273,10 +276,8 @@ static subpicture_t *FilterRender(filter_t *p_filter, mtime_t display_date)
     subpicture_t *p_spu = filter_NewSubpicture(p_filter);
     if (!p_spu) return NULL;
 
-    // Región de texto usando API del SDK (NO NewText / NO psz_text)
     video_format_t fmt;
     video_format_Init(&fmt, VLC_CODEC_TEXT);
-
     subpicture_region_t *p_region = subpicture_region_New(&fmt);
     video_format_Clean(&fmt);
 
