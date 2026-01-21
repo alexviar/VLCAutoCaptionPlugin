@@ -41,6 +41,7 @@ struct filter_sys_t {
     std::mutex buffer_mutex;
     std::thread worker_thread;
     bool running;
+    std::string language;
 };
 
 extern "C" {
@@ -56,6 +57,7 @@ vlc_module_begin ()
     set_subcategory(SUBCAT_AUDIO_AFILTER)
     set_callbacks(OpenAudio, CloseAudio)
     add_string("whisper-model", "ggml-base.bin", N_("Model path"), NULL, false)
+    add_string("whisper-language", "auto", N_("Inference language"), N_("ISO 639-1 language code (e.g. 'es', 'en', 'fr') or 'auto'"), false)
 vlc_module_end ()
 
 static void WhisperWorker(filter_t *);
@@ -126,7 +128,7 @@ static void WhisperWorker(filter_t *p_filter)
         msg_Info(p_filter, "Buffer OK (bloque de %zu), resampleando e iniciando inferencia...", samples.size());
 
         whisper_full_params wp = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
-        wp.language = "es";
+        wp.language = p_sys->language.c_str();
 
         // Resampling a 16kHz (Requerido por Whisper)
         std::vector<float> samples16;
@@ -185,7 +187,11 @@ static int OpenAudio(vlc_object_t *obj)
     char *psz = var_InheritString(p_filter, "whisper-model");
     const char *model_path = psz ? psz : "ggml-base.bin";
     
-    msg_Info(p_filter, "Cargando modelo: %s", model_path);
+    char *psz_lang = var_InheritString(p_filter, "whisper-language");
+    p_sys->language = psz_lang ? psz_lang : "auto";
+    // free(psz_lang); Cross-Heap Allocation Issue caused by mismatched compilers (msvc vs gcc)
+
+    msg_Info(p_filter, "Cargando modelo: %s (Idioma: %s)", model_path, p_sys->language.c_str());
     whisper_context_params cparams = whisper_context_default_params();
     p_sys->ctx = whisper_init_from_file_with_params(model_path, cparams);
     // free(psz); Cross-Heap Allocation Issue caused by mismatched compilers (msvc vs gcc)
