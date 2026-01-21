@@ -3,6 +3,15 @@ project(vlc_whisper_subs)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+
+if (WIN32)
+    set(VLC_PLUGIN_SUFFIX ".dll")
+    set(VLC_CORE_LIB "libvlccore")
+else()
+    set(VLC_PLUGIN_SUFFIX ".so")
+    set(VLC_CORE_LIB "vlccore")
+endif()
 
 # -----------------------------------------------------------------------------
 # 1. Fetch whisper.cpp
@@ -34,7 +43,11 @@ if (NOT VLC_INCLUDE_DIRS)
 
     if (NOT VLC_FOUND)
         # Fallback default
-        set(VLC_INCLUDE_DIRS "C:/Program Files/VideoLAN/VLC/sdk/include" CACHE PATH "Path to VLC SDK headers")
+        if (WIN32)
+            set(VLC_INCLUDE_DIRS "C:/Program Files/VideoLAN/VLC/sdk/include" CACHE PATH "Path to VLC SDK headers")
+        else()
+            set(VLC_INCLUDE_DIRS "/usr/include" CACHE PATH "Path to VLC SDK headers")
+        endif()
     endif()
 endif()
 
@@ -53,8 +66,8 @@ target_include_directories(whisper_subs PRIVATE
     ${VLC_INCLUDE_DIRS}/vlc/plugins
 )
 
-# Link against internal whisper library
-target_link_libraries(whisper_subs PRIVATE whisper)
+# Link against internal whisper library and VLC core library
+target_link_libraries(whisper_subs PRIVATE whisper ${VLC_CORE_LIB})
 
 if (WIN32)
     if (NOT VLC_LIB_DIR)
@@ -63,15 +76,12 @@ if (WIN32)
     message(STATUS "VLC Lib Dir: ${VLC_LIB_DIR}")
 
     target_link_directories(whisper_subs PRIVATE ${VLC_LIB_DIR})
-    
-    # Usually needed to resolve mdate/var_Inherit/subpicture/etc.
-    target_link_libraries(whisper_subs PRIVATE libvlccore)
 endif()
 
 # VLC Plugins are shared libraries but often need specific prefixes/suffixes
 set_target_properties(whisper_subs PROPERTIES
     PREFIX ""
-    SUFFIX ".dll" # or .so on Linux
+    SUFFIX ${VLC_PLUGIN_SUFFIX}
 )
 
 # Definitions for VLC Plugin
