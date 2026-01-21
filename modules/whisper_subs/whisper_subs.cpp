@@ -96,10 +96,10 @@ static block_t *ProcessAudio(filter_t *p_filter, block_t *p_block)
     }
 
     // DEBUG: Should remove it
-    static int log_counter = 0;
-    if (++log_counter % 500 == 0) {
-        msg_Info(p_filter, "Buffer Whisper: %zu muestras acumuladas", p_sys->pcm_buffer.size());
-    }
+    // static int log_counter = 0;
+    // if (++log_counter % 500 == 0) {
+    //     msg_Info(p_filter, "Buffer Whisper: %zu muestras acumuladas", p_sys->pcm_buffer.size());
+    // }
 
     return p_block;
 }
@@ -127,7 +127,7 @@ static void WhisperWorker(filter_t *p_filter)
             continue;
         }
 
-        msg_Info(p_filter, "Buffer OK (bloque de %zu), resampleando e iniciando inferencia...", samples.size());
+        // msg_Info(p_filter, "Buffer OK (bloque de %zu), resampleando e iniciando inferencia...", samples.size());
 
         whisper_full_params wp = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
         wp.language = p_sys->language.c_str();
