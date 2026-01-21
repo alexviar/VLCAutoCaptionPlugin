@@ -66,8 +66,12 @@ target_include_directories(whisper_subs PRIVATE
     ${VLC_INCLUDE_DIRS}/vlc/plugins
 )
 
-# Link against internal whisper library and VLC core library
-target_link_libraries(whisper_subs PRIVATE whisper ${VLC_CORE_LIB})
+# Link against internal whisper library
+target_link_libraries(whisper_subs PRIVATE whisper)
+
+if (WIN32)
+    target_link_libraries(whisper_subs PRIVATE ${VLC_CORE_LIB})
+endif()
 
 if (WIN32)
     if (NOT VLC_LIB_DIR)
