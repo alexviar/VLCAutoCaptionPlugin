@@ -8,6 +8,7 @@ on:
 
 jobs:
   build-windows:
+    if: false
     runs-on: windows-latest
 
     steps:
@@ -50,19 +51,77 @@ jobs:
 
   build-linux:
     runs-on: ubuntu-22.04
+
     steps:
       - uses: actions/checkout@v3
+
+      # ---- DEBUG: entorno base ----
+      - name: Debug system info
+        run: |
+          uname -a
+          lsb_release -a
+          gcc --version
+          cmake --version
+
+      # ---- DEBUG: VLC runtime vs headers ----
+      - name: Debug VLC packages versions
+        run: |
+          apt-cache policy vlc libvlc-dev libvlccore-dev || true
+          dpkg -l | grep -E 'vlc|libvlc' || true
 
       - name: Install dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y libvlc-dev libvlccore-dev pkg-config cmake build-essential
 
+      # ---- DEBUG: pkg-config (CRÍTICO para el entry point) ----
+      - name: Debug pkg-config vlc-plugin
+        run: |
+          pkg-config --modversion vlc-plugin
+          pkg-config --cflags vlc-plugin
+          pkg-config --libs vlc-plugin
+
+      # ---- DEBUG: headers reales usados ----
+      - name: Debug vlc headers location
+        run: |
+          pkg-config --cflags vlc-plugin | tr ' ' '\n'
+          ls -l /usr/include/vlc || true
+
       - name: Configure CMake
-        run: cmake -B build -S . -DCMAKE_BUILD_TYPE=Release
+        run: |
+          cmake -B build -S . \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_VERBOSE_MAKEFILE=ON
+
+      # ---- DEBUG: flags efectivos de compilación ----
+      - name: Debug compile commands
+        run: |
+          if [ -f build/compile_commands.json ]; then
+            head -n 50 build/compile_commands.json
+          else
+            echo "compile_commands.json not generated"
+          fi
 
       - name: Build
-        run: cmake --build build --config Release
+        run: cmake --build build --config Release --verbose
+
+      # ---- DEBUG: binario generado ----
+      - name: Debug plugin binary
+        run: |
+          ls -lh build
+          file build/libwhisper_subs_plugin.so
+          ldd build/libwhisper_subs_plugin.so || true
+
+      # ---- DEBUG: ENTRY POINT (EL PROBLEMA QUE ESTÁS TENIENDO) ----
+      - name: Debug VLC entry symbols
+        run: |
+          nm -D build/libwhisper_subs_plugin.so | grep vlc_entry || true
+          readelf -Ws build/libwhisper_subs_plugin.so | grep vlc_entry || true
+
+      # ---- DEBUG: visibilidad de símbolos ----
+      - name: Debug exported symbols count
+        run: |
+          nm -D build/libwhisper_subs_plugin.so | wc -l
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
