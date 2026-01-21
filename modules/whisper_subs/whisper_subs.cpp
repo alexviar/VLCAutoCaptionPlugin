@@ -82,14 +82,14 @@ static block_t *ProcessAudio(filter_t *p_filter, block_t *p_block)
     std::lock_guard<std::mutex> lock(p_sys->buffer_mutex);
 
     // Límite de seguridad: 10 segundos de audio (basado en el rate de entrada)
-    size_t max_samples = p_filter->fmt_in.audio.i_rate * 10;
-    if (p_sys->pcm_buffer.size() + p_block->i_nb_samples > max_samples) {
-        size_t overflow = p_sys->pcm_buffer.size() + p_block->i_nb_samples - max_samples;
-        p_sys->pcm_buffer.erase(p_sys->pcm_buffer.begin(), 
-                                p_sys->pcm_buffer.begin() + overflow);
-    }
+    // size_t max_samples = p_filter->fmt_in.audio.i_rate * 10;
+    // if (p_sys->pcm_buffer.size() + p_block->i_nb_samples > max_samples) {
+    //     size_t overflow = p_sys->pcm_buffer.size() + p_block->i_nb_samples - max_samples;
+    //     p_sys->pcm_buffer.erase(p_sys->pcm_buffer.begin(), 
+    //                             p_sys->pcm_buffer.begin() + overflow);
+    // }
 
-    p_sys->pcm_buffer.reserve(max_samples);
+    // p_sys->pcm_buffer.reserve(max_samples);
 
     for (size_t i = 0; i < p_block->i_nb_samples; ++i) {
         p_sys->pcm_buffer.push_back(p_samples[i * ch]); // Canal 0
