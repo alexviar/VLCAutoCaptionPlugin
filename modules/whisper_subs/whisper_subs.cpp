@@ -42,6 +42,7 @@ struct filter_sys_t {
     std::thread worker_thread;
     bool running;
     std::string language;
+    bool translate;
 };
 
 extern "C" {
@@ -58,6 +59,7 @@ vlc_module_begin ()
     set_callbacks(OpenAudio, CloseAudio)
     add_string("whisper-model", "ggml-base.bin", N_("Model path"), NULL, false)
     add_string("whisper-language", "auto", N_("Inference language"), N_("ISO 639-1 language code (e.g. 'es', 'en', 'fr') or 'auto'"), false)
+    add_bool("whisper-translate", false, N_("Translate to English"), N_("Translate the transcribed text to English"), false)
 vlc_module_end ()
 
 static void WhisperWorker(filter_t *);
@@ -129,6 +131,7 @@ static void WhisperWorker(filter_t *p_filter)
 
         whisper_full_params wp = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
         wp.language = p_sys->language.c_str();
+        wp.translate = p_sys->translate;
 
         // Resampling a 16kHz (Requerido por Whisper)
         std::vector<float> samples16;
@@ -191,7 +194,10 @@ static int OpenAudio(vlc_object_t *obj)
     p_sys->language = psz_lang ? psz_lang : "auto";
     // free(psz_lang); Cross-Heap Allocation Issue caused by mismatched compilers (msvc vs gcc)
 
-    msg_Info(p_filter, "Cargando modelo: %s (Idioma: %s)", model_path, p_sys->language.c_str());
+    p_sys->translate = var_InheritBool(p_filter, "whisper-translate");
+
+    msg_Info(p_filter, "Cargando modelo: %s (Idioma: %s, Traducción: %s)", 
+             model_path, p_sys->language.c_str(), p_sys->translate ? "SÍ" : "NO");
     whisper_context_params cparams = whisper_context_default_params();
     p_sys->ctx = whisper_init_from_file_with_params(model_path, cparams);
     // free(psz); Cross-Heap Allocation Issue caused by mismatched compilers (msvc vs gcc)
