@@ -80,8 +80,8 @@ endif()
 
 # VLC Plugins are shared libraries but often need specific prefixes/suffixes
 set_target_properties(whisper_subs PROPERTIES
-    PREFIX ""
-    SUFFIX ${VLC_PLUGIN_SUFFIX}
+    PREFIX "lib"
+    SUFFIX "_plugin${VLC_PLUGIN_SUFFIX}"
 )
 
 # Definitions for VLC Plugin
