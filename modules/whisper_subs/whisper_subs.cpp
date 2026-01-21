@@ -52,6 +52,8 @@ vlc_module_begin ()
     set_description(N_("Whisper Audio-to-Text (Audio Filter)"))
     set_shortname(N_("Whisper ASR"))
     set_capability("audio filter", 0)
+    set_category(CAT_AUDIO)
+    set_subcategory(SUBCAT_AUDIO_AFILTER)
     set_callbacks(OpenAudio, CloseAudio)
     add_string("whisper-model", "ggml-base.bin", N_("Model path"), NULL, false)
 vlc_module_end ()
@@ -119,9 +121,11 @@ static void WhisperWorker(filter_t *p_filter)
             continue;
         }
 
+        msg_Info(p_filter, "Buffer OK (bloque de %zu), simulando inferencia...", samples.size());
+
         whisper_full_params wp = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
         wp.language = "es";
-
+        
         if (whisper_full(p_sys->ctx, wp, samples.data(), (int)samples.size()) == 0) {
             const int n = whisper_full_n_segments(p_sys->ctx);
             std::string result;
@@ -153,6 +157,15 @@ static int OpenAudio(vlc_object_t *obj)
 
     p_filter->p_sys = p_sys;
     p_filter->pf_audio_filter = ProcessAudio;
+    msg_Info(p_filter, "Formato de entrada: %d Hz, %d canales", 
+         p_filter->fmt_in.audio.i_rate, p_filter->fmt_in.audio.i_channels);
+
+    // if (p_filter->fmt_in.audio.i_rate != 16000) {
+    //     msg_Err(p_filter, "Whisper requiere 16000Hz, pero el stream es de %dHz", p_filter->fmt_in.audio.i_rate);
+    //     delete p_sys;
+    //     p_filter->p_sys = NULL;
+    //     return VLC_EGENERIC;
+    // }
 
     char *psz = var_InheritString(p_filter, "whisper-model");
     const char *model_path = psz ? psz : "ggml-base.bin";
@@ -160,7 +173,7 @@ static int OpenAudio(vlc_object_t *obj)
     msg_Info(p_filter, "Cargando modelo: %s", model_path);
     whisper_context_params cparams = whisper_context_default_params();
     p_sys->ctx = whisper_init_from_file_with_params(model_path, cparams);
-    free(psz);
+    // free(psz); Cross-Heap Allocation Issue caused by mismatched compilers (msvc vs gcc)
 
     if (!p_sys->ctx) {
         msg_Err(p_filter, "Error cargando Whisper");
