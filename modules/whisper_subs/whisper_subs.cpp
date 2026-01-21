@@ -77,13 +77,15 @@ static block_t *ProcessAudio(filter_t *p_filter, block_t *p_block)
     // Mutex para evitar crash al leer desde el hilo
     std::lock_guard<std::mutex> lock(p_sys->buffer_mutex);
 
-    // Límite de seguridad: 10 segundos (160k samples a 16kHz) para evitar OOM
-    if (p_sys->pcm_buffer.size() > 160000) {
+    // Límite de seguridad: 10 segundos de audio (basado en el rate de entrada)
+    size_t max_samples = p_filter->fmt_in.audio.i_rate * 10;
+    if (p_sys->pcm_buffer.size() + p_block->i_nb_samples > max_samples) {
+        size_t overflow = p_sys->pcm_buffer.size() + p_block->i_nb_samples - max_samples;
         p_sys->pcm_buffer.erase(p_sys->pcm_buffer.begin(), 
-                                p_sys->pcm_buffer.begin() + p_block->i_nb_samples);
+                                p_sys->pcm_buffer.begin() + overflow);
     }
 
-    p_sys->pcm_buffer.reserve(p_sys->pcm_buffer.size() + p_block->i_nb_samples);
+    p_sys->pcm_buffer.reserve(max_samples);
 
     for (size_t i = 0; i < p_block->i_nb_samples; ++i) {
         p_sys->pcm_buffer.push_back(p_samples[i * ch]); // Canal 0
@@ -101,7 +103,7 @@ static block_t *ProcessAudio(filter_t *p_filter, block_t *p_block)
 static void WhisperWorker(filter_t *p_filter)
 {
     filter_sys_t *p_sys = (filter_sys_t *)p_filter->p_sys;
-    const size_t CHUNK_SAMPLES = 16000 * 3;
+    const size_t CHUNK_SAMPLES = p_filter->fmt_in.audio.i_rate * 3;
 
     msg_Info(p_filter, "Hilo de Whisper iniciado.");
 
@@ -121,12 +123,25 @@ static void WhisperWorker(filter_t *p_filter)
             continue;
         }
 
-        msg_Info(p_filter, "Buffer OK (bloque de %zu), simulando inferencia...", samples.size());
+        msg_Info(p_filter, "Buffer OK (bloque de %zu), resampleando e iniciando inferencia...", samples.size());
 
         whisper_full_params wp = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
         wp.language = "es";
+
+        // Resampling a 16kHz (Requerido por Whisper)
+        std::vector<float> samples16;
+        const double scale = 16000.0 / p_filter->fmt_in.audio.i_rate;
+        const size_t n_out = (size_t)(samples.size() * scale);
+        samples16.reserve(n_out);
+
+        for (size_t i = 0; i < n_out; i++) {
+            size_t src_idx = (size_t)(i / scale);
+            if (src_idx < samples.size()) {
+                samples16.push_back(samples[src_idx]);
+            }
+        }
         
-        if (whisper_full(p_sys->ctx, wp, samples.data(), (int)samples.size()) == 0) {
+        if (whisper_full(p_sys->ctx, wp, samples16.data(), (int)samples16.size()) == 0) {
             const int n = whisper_full_n_segments(p_sys->ctx);
             std::string result;
             for (int i = 0; i < n; ++i) {
@@ -136,9 +151,9 @@ static void WhisperWorker(filter_t *p_filter)
 
             if (!result.empty()) {
                 msg_Info(p_filter, "Whisper: %s", result.c_str());
-                std::lock_guard<std::mutex> lock(g_state.lock);
-                g_state.current_text = result;
-                g_state.last_update = mdate();
+                // std::lock_guard<std::mutex> lock(g_state.lock);
+                // g_state.current_text = result;
+                // g_state.last_update = mdate();
             }
         }
     }
