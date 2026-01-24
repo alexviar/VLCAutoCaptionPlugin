@@ -60,6 +60,8 @@ vlc_module_begin ()
     add_string("whisper-model", "ggml-base.bin", N_("Model path"), NULL, false)
     add_string("whisper-language", "auto", N_("Inference language"), N_("ISO 639-1 language code (e.g. 'es', 'en', 'fr') or 'auto'"), false)
     add_bool("whisper-translate", false, N_("Translate to English"), N_("Translate the transcribed text to English"), false)
+    add_bool("whisper-use-gpu", true, N_("Use GPU"), N_("Use GPU for inference if available"), false)
+    add_bool("whisper-flash-attn", false, N_("Flash Attention"), N_("Use Flash Attention (speeds up inference, requires compatible GPU)"), false)
 vlc_module_end ()
 
 static void WhisperWorker(filter_t *);
@@ -195,10 +197,17 @@ static int OpenAudio(vlc_object_t *obj)
     // free(psz_lang); Cross-Heap Allocation Issue caused by mismatched compilers (msvc vs gcc)
 
     p_sys->translate = var_InheritBool(p_filter, "whisper-translate");
+    bool use_gpu = var_InheritBool(p_filter, "whisper-use-gpu");
+    bool flash_attn = var_InheritBool(p_filter, "whisper-flash-attn");
 
-    msg_Info(p_filter, "Cargando modelo: %s (Idioma: %s, Traducción: %s)", 
-             model_path, p_sys->language.c_str(), p_sys->translate ? "SÍ" : "NO");
+    msg_Info(p_filter, "Cargando modelo: %s (Idioma: %s, Traducción: %s, GPU: %s, FlashAttn: %s)", 
+             model_path, p_sys->language.c_str(), p_sys->translate ? "SÍ" : "NO",
+             use_gpu ? "SÍ" : "NO", flash_attn ? "SÍ" : "NO");
+
     whisper_context_params cparams = whisper_context_default_params();
+    cparams.use_gpu = use_gpu;
+    cparams.flash_attn = flash_attn;
+
     p_sys->ctx = whisper_init_from_file_with_params(model_path, cparams);
     // free(psz); Cross-Heap Allocation Issue caused by mismatched compilers (msvc vs gcc)
 
