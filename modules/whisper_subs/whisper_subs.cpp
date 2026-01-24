@@ -109,7 +109,7 @@ static block_t *ProcessAudio(filter_t *p_filter, block_t *p_block)
 static void WhisperWorker(filter_t *p_filter)
 {
     filter_sys_t *p_sys = (filter_sys_t *)p_filter->p_sys;
-    const size_t CHUNK_SAMPLES = p_filter->fmt_in.audio.i_rate * 3;
+    const size_t CHUNK_SAMPLES = p_filter->fmt_in.audio.i_rate * 10;
 
     msg_Info(p_filter, "Hilo de Whisper iniciado.");
 
@@ -120,7 +120,7 @@ static void WhisperWorker(filter_t *p_filter)
             std::lock_guard<std::mutex> lock(p_sys->buffer_mutex);
             if (p_sys->pcm_buffer.size() >= CHUNK_SAMPLES) {
                 samples.assign(p_sys->pcm_buffer.begin(), p_sys->pcm_buffer.end());
-                p_sys->pcm_buffer.erase(p_sys->pcm_buffer.begin(), p_sys->pcm_buffer.end() - p_filter->fmt_in.audio.i_rate * 1);
+                p_sys->pcm_buffer.erase(p_sys->pcm_buffer.begin(), p_sys->pcm_buffer.end() - p_filter->fmt_in.audio.i_rate * 7);
             }
         }
 
