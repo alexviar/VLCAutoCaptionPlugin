@@ -43,6 +43,7 @@ struct filter_sys_t {
     bool running;
     std::string language;
     bool translate;
+    int n_threads;
 };
 
 extern "C" {
@@ -62,6 +63,7 @@ vlc_module_begin ()
     add_bool("whisper-translate", false, N_("Translate to English"), N_("Translate the transcribed text to English"), false)
     add_bool("whisper-use-gpu", true, N_("Use GPU"), N_("Use GPU for inference if available"), false)
     add_bool("whisper-flash-attn", false, N_("Flash Attention"), N_("Use Flash Attention (speeds up inference, requires compatible GPU)"), false)
+    add_integer("whisper-threads", 0, N_("Number of threads"), N_("Number of CPU threads for inference (0 = Auto)"), false)
 vlc_module_end ()
 
 static void WhisperWorker(filter_t *);
@@ -134,6 +136,7 @@ static void WhisperWorker(filter_t *p_filter)
         whisper_full_params wp = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
         wp.language = p_sys->language.c_str();
         wp.translate = p_sys->translate;
+        wp.n_threads = p_sys->n_threads;
 
         // Resampling a 16kHz (Requerido por Whisper)
         std::vector<float> samples16;
@@ -200,9 +203,20 @@ static int OpenAudio(vlc_object_t *obj)
     bool use_gpu = var_InheritBool(p_filter, "whisper-use-gpu");
     bool flash_attn = var_InheritBool(p_filter, "whisper-flash-attn");
 
-    msg_Info(p_filter, "Cargando modelo: %s (Idioma: %s, Traducción: %s, GPU: %s, FlashAttn: %s)", 
+    int max_hw = std::thread::hardware_concurrency();
+    if (max_hw < 1) max_hw = 1;
+
+    p_sys->n_threads = var_InheritInteger(p_filter, "whisper-threads");
+    if (p_sys->n_threads <= 0) {
+        p_sys->n_threads = (max_hw > 4) ? 4 : max_hw;
+    } else if (p_sys->n_threads > max_hw) {
+        msg_Warn(p_filter, "Hilos configurados (%d) exceden el hardware. Limitando a %d", p_sys->n_threads, max_hw);
+        p_sys->n_threads = max_hw;
+    }
+
+    msg_Info(p_filter, "Cargando modelo: %s (Idioma: %s, Traducción: %s, GPU: %s, FlashAttn: %s, Threads: %d)", 
              model_path, p_sys->language.c_str(), p_sys->translate ? "SÍ" : "NO",
-             use_gpu ? "SÍ" : "NO", flash_attn ? "SÍ" : "NO");
+             use_gpu ? "SÍ" : "NO", flash_attn ? "SÍ" : "NO", p_sys->n_threads);
 
     whisper_context_params cparams = whisper_context_default_params();
     cparams.use_gpu = use_gpu;
