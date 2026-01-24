@@ -8,7 +8,6 @@ on:
 
 jobs:
   build-windows:
-    if: false
     runs-on: windows-latest
 
     steps:
