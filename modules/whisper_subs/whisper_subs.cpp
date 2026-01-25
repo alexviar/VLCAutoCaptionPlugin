@@ -138,7 +138,7 @@ static void WhisperWorker(filter_t *p_filter)
             continue;
         }
 
-        // msg_Info(p_filter, "Buffer OK (bloque de %zu), resampleando e iniciando inferencia...", samples.size());
+        msg_Info(p_filter, "Buffer OK (bloque de %zu), resampleando e iniciando inferencia...", samples.size());
 
         whisper_full_params wp = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
         wp.language = p_sys->language.c_str();
