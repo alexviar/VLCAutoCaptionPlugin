@@ -44,6 +44,8 @@ struct filter_sys_t {
     std::string language;
     bool translate;
     int n_threads;
+    int chunk_size;
+    int keep_size;
 };
 
 extern "C" {
@@ -64,6 +66,8 @@ vlc_module_begin ()
     add_bool("whisper-use-gpu", true, N_("Use GPU"), N_("Use GPU for inference if available"), false)
     add_bool("whisper-flash-attn", false, N_("Flash Attention"), N_("Use Flash Attention (speeds up inference, requires compatible GPU)"), false)
     add_integer("whisper-threads", 0, N_("Number of threads"), N_("Number of CPU threads for inference (0 = Auto)"), false)
+    add_integer("whisper-chunk-size", 10, N_("Chunk size (s)"), N_("Amount of audio to process at once in seconds"), false)
+    add_integer("whisper-keep-size", 7, N_("Keep size (s)"), N_("Amount of audio to keep for context in seconds"), false)
 vlc_module_end ()
 
 static void WhisperWorker(filter_t *);
@@ -111,7 +115,8 @@ static block_t *ProcessAudio(filter_t *p_filter, block_t *p_block)
 static void WhisperWorker(filter_t *p_filter)
 {
     filter_sys_t *p_sys = (filter_sys_t *)p_filter->p_sys;
-    const size_t CHUNK_SAMPLES = p_filter->fmt_in.audio.i_rate * 10;
+    const size_t CHUNK_SAMPLES = p_filter->fmt_in.audio.i_rate * p_sys->chunk_size;
+    const size_t KEEP_SAMPLES = p_filter->fmt_in.audio.i_rate * p_sys->keep_size;
 
     msg_Info(p_filter, "Hilo de Whisper iniciado.");
 
@@ -122,7 +127,7 @@ static void WhisperWorker(filter_t *p_filter)
             std::lock_guard<std::mutex> lock(p_sys->buffer_mutex);
             if (p_sys->pcm_buffer.size() >= CHUNK_SAMPLES) {
                 samples.assign(p_sys->pcm_buffer.begin(), p_sys->pcm_buffer.end());
-                p_sys->pcm_buffer.erase(p_sys->pcm_buffer.begin(), p_sys->pcm_buffer.end() - p_filter->fmt_in.audio.i_rate * 7);
+                p_sys->pcm_buffer.erase(p_sys->pcm_buffer.begin(), p_sys->pcm_buffer.end() - KEEP_SAMPLES);
             }
         }
 
@@ -213,6 +218,14 @@ static int OpenAudio(vlc_object_t *obj)
         msg_Warn(p_filter, "Hilos configurados (%d) exceden el hardware. Limitando a %d", p_sys->n_threads, max_hw);
         p_sys->n_threads = max_hw;
     }
+
+    p_sys->chunk_size = var_InheritInteger(p_filter, "whisper-chunk-size");
+    p_sys->keep_size = var_InheritInteger(p_filter, "whisper-keep-size");
+    if (p_sys->keep_size >= p_sys->chunk_size) {
+        msg_Warn(p_filter, "Keep size (%d) >= Chunk size (%d). Ajustando keep a la mitad del chunk", p_sys->keep_size, p_sys->chunk_size);
+        p_sys->keep_size = p_sys->chunk_size / 2;
+    }
+    if (p_sys->keep_size < 0) p_sys->keep_size = 0;
 
     msg_Info(p_filter, "Cargando modelo: %s (Idioma: %s, Traducción: %s, GPU: %s, FlashAttn: %s, Threads: %d)", 
              model_path, p_sys->language.c_str(), p_sys->translate ? "SÍ" : "NO",
