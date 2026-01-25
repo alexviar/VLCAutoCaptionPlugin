@@ -46,6 +46,7 @@ struct filter_sys_t {
     int n_threads;
     int chunk_size;
     int keep_size;
+    bool diarize;
 };
 
 extern "C" {
@@ -68,6 +69,7 @@ vlc_module_begin ()
     add_integer("whisper-threads", 0, N_("Number of threads"), N_("Number of CPU threads for inference (0 = Auto)"), false)
     add_integer("whisper-chunk-size", 10, N_("Chunk size (s)"), N_("Amount of audio to process at once in seconds"), false)
     add_integer("whisper-keep-size", 7, N_("Keep size (s)"), N_("Amount of audio to keep for context in seconds"), false)
+    add_bool("whisper-diarize", false, N_("Enable Diarization"), N_("Enable speaker turn detection (requires tinydiarize compatible model)"), false)
 vlc_module_end ()
 
 static void WhisperWorker(filter_t *);
@@ -142,6 +144,7 @@ static void WhisperWorker(filter_t *p_filter)
         wp.language = p_sys->language.c_str();
         wp.translate = p_sys->translate;
         wp.n_threads = p_sys->n_threads;
+        wp.tdrz_enable = p_sys->diarize;
 
         // Resampling a 16kHz (Requerido por Whisper)
         std::vector<float> samples16;
@@ -227,9 +230,12 @@ static int OpenAudio(vlc_object_t *obj)
     }
     if (p_sys->keep_size < 0) p_sys->keep_size = 0;
 
-    msg_Info(p_filter, "Cargando modelo: %s (Idioma: %s, Traducción: %s, GPU: %s, FlashAttn: %s, Threads: %d)", 
+    p_sys->diarize = var_InheritBool(p_filter, "whisper-diarize");
+
+    msg_Info(p_filter, "Cargando modelo: %s (Idioma: %s, Traducción: %s, GPU: %s, FlashAttn: %s, Threads: %d, Diarización: %s)", 
              model_path, p_sys->language.c_str(), p_sys->translate ? "SÍ" : "NO",
-             use_gpu ? "SÍ" : "NO", flash_attn ? "SÍ" : "NO", p_sys->n_threads);
+             use_gpu ? "SÍ" : "NO", flash_attn ? "SÍ" : "NO", p_sys->n_threads,
+             p_sys->diarize ? "SÍ" : "NO");
 
     whisper_context_params cparams = whisper_context_default_params();
     cparams.use_gpu = use_gpu;
